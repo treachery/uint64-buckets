@@ -9,6 +9,10 @@ import (
 	"github.com/pkg/errors"
 )
 
+var (
+	defaultExpireSec = uint64(24 * 60 * 60)
+)
+
 var _ bitmaper = &RedisBitmap{}
 
 type bitmaper interface {
@@ -32,14 +36,20 @@ rb_{key}_{bucketid}: 用bitmap存储每个bucket的offsets
 type RedisBitmap struct {
 	pool *redis.Pool
 
-	key string
+	key    string
+	expire uint64
 }
 
-func NewRedisBitmap(pool *redis.Pool, key string) bitmaper {
-	return &RedisBitmap{
-		pool: pool,
-		key:  key,
+func NewRedisBitmap(pool *redis.Pool, key string, expire uint64) bitmaper {
+	rb := &RedisBitmap{
+		pool:   pool,
+		key:    key,
+		expire: expire,
 	}
+	if expire == 0 {
+		rb.expire = defaultExpireSec
+	}
+	return rb
 }
 
 func (r *RedisBitmap) getZsetKey() string {
@@ -60,11 +70,19 @@ func (r *RedisBitmap) Add(ctx context.Context, ids ...uint64) error {
 	for _, id := range ids {
 		bucketid, offset := getBucketId(id), getOffset(id)
 		//1. 加bucket
-		if err := conn.Send("ZADD", r.getZsetKey(), bucketid, bucketid); err != nil {
+		zsetkey := r.getZsetKey()
+		if err := conn.Send("ZADD", zsetkey, bucketid, bucketid); err != nil {
+			return errors.Wrapf(err, "key(%s) Add ids(%+v)", r.key, ids)
+		}
+		if err := conn.Send("EXPIRE", zsetkey, r.expire); err != nil {
 			return errors.Wrapf(err, "key(%s) Add ids(%+v)", r.key, ids)
 		}
 		//2. 设置offset
-		if err := conn.Send("SETBIT", r.getBucketBmKey(bucketid), offset, 1); err != nil {
+		bmkey := r.getBucketBmKey(bucketid)
+		if err := conn.Send("SETBIT", bmkey, offset, 1); err != nil {
+			return errors.Wrapf(err, "key(%s) Add ids(%+v)", r.key, ids)
+		}
+		if err := conn.Send("EXPIRE", bmkey, r.expire); err != nil {
 			return errors.Wrapf(err, "key(%s) Add ids(%+v)", r.key, ids)
 		}
 	}
@@ -72,7 +90,7 @@ func (r *RedisBitmap) Add(ctx context.Context, ids ...uint64) error {
 		return errors.Wrapf(err, "key(%s) Add ids(%+v)", r.key, ids)
 	}
 
-	for i := len(ids) * 2; i > 0; i-- {
+	for i := len(ids) * 4; i > 0; i-- {
 		if _, err := conn.Receive(); err != nil {
 			return errors.Wrapf(err, "key(%s) Add ids(%+v)", r.key, ids)
 		}

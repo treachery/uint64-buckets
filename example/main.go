@@ -13,7 +13,7 @@ import (
 
 func main() {
 	testCtx := context.Background()
-	rb := ub.NewRedisBitmap(newPool("redis://127.0.0.1:6379"), "test_bm")
+	rb := ub.NewRedisBitmap(newPool("redis://127.0.0.1:6379"), "test_bm", 1000)
 
 	nums := []uint64{0, 100, 1000000, 1000000000, 1000000000000, 1000000000000000, 1000000000000000000}
 	if err := rb.Add(testCtx, nums...); err != nil {
