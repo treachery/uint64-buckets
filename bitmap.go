@@ -3,6 +3,7 @@
 import (
 	"context"
 	"fmt"
+	"math"
 	"strconv"
 
 	"github.com/opencensus-integrations/redigo/redis"
@@ -16,9 +17,6 @@ var (
 var _ bitmaper = &RedisBitmap{}
 
 type bitmaper interface {
-	GetZsetKey() string
-	GetBucketBmKey(bucketid uint64) string
-
 	Add(ctx context.Context, ids ...uint64) error
 	Contains(ctx context.Context, id uint64) (bool, error)
 	Size(ctx context.Context) (uint64, error)
@@ -55,11 +53,11 @@ func NewRedisBitmap(pool *redis.Pool, key string, expire uint64) bitmaper {
 	return rb
 }
 
-func (r *RedisBitmap) GetZsetKey() string {
+func (r *RedisBitmap) getZsetKey() string {
 	return fmt.Sprintf("rb_%s", r.key)
 }
 
-func (r *RedisBitmap) GetBucketBmKey(bucketid uint64) string {
+func (r *RedisBitmap) getBucketBmKey(bucketid uint64) string {
 	return fmt.Sprintf("rb_%s_%x", r.key, bucketid)
 }
 
@@ -73,7 +71,7 @@ func (r *RedisBitmap) Add(ctx context.Context, ids ...uint64) error {
 	for _, id := range ids {
 		bucketid, offset := getBucketId(id), getOffset(id)
 		//1. 加bucket
-		zsetkey := r.GetZsetKey()
+		zsetkey := r.getZsetKey()
 		if err := conn.Send("ZADD", zsetkey, bucketid, bucketid); err != nil {
 			return errors.Wrapf(err, "key(%s) Add ids(%+v)", r.key, ids)
 		}
@@ -81,7 +79,7 @@ func (r *RedisBitmap) Add(ctx context.Context, ids ...uint64) error {
 			return errors.Wrapf(err, "key(%s) Add ids(%+v)", r.key, ids)
 		}
 		//2. 设置offset
-		bmkey := r.GetBucketBmKey(bucketid)
+		bmkey := r.getBucketBmKey(bucketid)
 		if err := conn.Send("SETBIT", bmkey, offset, 1); err != nil {
 			return errors.Wrapf(err, "key(%s) Add ids(%+v)", r.key, ids)
 		}
@@ -111,7 +109,7 @@ func (r *RedisBitmap) Contains(ctx context.Context, id uint64) (bool, error) {
 	bucketid := getBucketId(id)
 	offset := getOffset(id)
 
-	exist, err := redis.Bool(conn.Do("GETBIT", r.GetBucketBmKey(bucketid), offset))
+	exist, err := redis.Bool(conn.Do("GETBIT", r.getBucketBmKey(bucketid), offset))
 	if err != nil {
 		if err == redis.ErrNil {
 			return false, nil
@@ -130,7 +128,7 @@ func (r *RedisBitmap) Size(ctx context.Context) (uint64, error) {
 
 	var (
 		bucketids   = []uint64{}
-		zsetkey     = r.GetZsetKey()
+		zsetkey     = r.getZsetKey()
 		start, stop = 0, 1000
 	)
 	for {
@@ -153,7 +151,7 @@ func (r *RedisBitmap) Size(ctx context.Context) (uint64, error) {
 
 	var size = uint64(0)
 	for _, id := range bucketids {
-		count, err := redis.Uint64(conn.Do("BITCOUNT", r.GetBucketBmKey(id), 0, 128))
+		count, err := redis.Uint64(conn.Do("BITCOUNT", r.getBucketBmKey(id), 0, 128))
 		if err != nil {
 			return 0, errors.Wrapf(err, "Size")
 		}
@@ -170,7 +168,7 @@ func (r *RedisBitmap) Min(ctx context.Context) (uint64, error) {
 	defer conn.Close()
 
 	//第一个bucket
-	bids, err := redis.Int64s(conn.Do("ZRANGE", r.GetZsetKey(), 0, 0))
+	bids, err := redis.Int64s(conn.Do("ZRANGE", r.getZsetKey(), 0, 0))
 	if err != nil {
 		return 0, errors.Wrapf(err, "key(%s) Max", r.key)
 	}
@@ -181,7 +179,7 @@ func (r *RedisBitmap) Min(ctx context.Context) (uint64, error) {
 	if err != nil {
 		return 0, errors.Wrapf(err, "key(%s) Max", r.key)
 	}
-	bucketoffset, err := redis.Uint64(conn.Do("BITPOS", r.GetBucketBmKey(bucketid), 1))
+	bucketoffset, err := redis.Uint64(conn.Do("BITPOS", r.getBucketBmKey(bucketid), 1))
 	if err != nil {
 		return 0, errors.Wrapf(err, "key(%s) Max", r.key)
 	}
@@ -196,7 +194,7 @@ func (r *RedisBitmap) Max(ctx context.Context) (uint64, error) {
 	defer conn.Close()
 
 	//最后一个bucket
-	bids, err := redis.Int64s(conn.Do("ZRANGE", r.GetZsetKey(), -1, -1))
+	bids, err := redis.Int64s(conn.Do("ZRANGE", r.getZsetKey(), -1, -1))
 	if err != nil {
 		return 0, errors.Wrapf(err, "key(%s) Max", r.key)
 	}
@@ -207,7 +205,7 @@ func (r *RedisBitmap) Max(ctx context.Context) (uint64, error) {
 	if err != nil {
 		return 0, errors.Wrapf(err, "key(%s) Max", r.key)
 	}
-	ids, err := r.bitRange(conn, r.GetBucketBmKey(bucketid), 0, capacity)
+	ids, err := r.bitRange(conn, r.getBucketBmKey(bucketid), 0, capacity)
 	if err != nil {
 		return 0, errors.Wrapf(err, "key(%s) Max", r.key)
 	}
@@ -226,7 +224,7 @@ func (r *RedisBitmap) Range(ctx context.Context, seq int) (ids []uint64, next in
 		return ids, -1, errors.Wrapf(err, "key(%s) Range seq(%d)", r.key, seq)
 	}
 	defer conn.Close()
-	bids, err := redis.Strings(conn.Do("ZRANGE", r.GetZsetKey(), seq, seq))
+	bids, err := redis.Strings(conn.Do("ZRANGE", r.getZsetKey(), seq, seq))
 	if err != nil {
 		return ids, -1, errors.Wrapf(err, "key(%s) Range seq(%d)", r.key, seq)
 	}
@@ -237,7 +235,7 @@ func (r *RedisBitmap) Range(ctx context.Context, seq int) (ids []uint64, next in
 	if err != nil {
 		return ids, -1, errors.Wrapf(err, "key(%s) Range seq(%d)", r.key, seq)
 	}
-	offsets, err := r.bitRange(conn, r.GetBucketBmKey(bucketid), 0, capacity)
+	offsets, err := r.bitRange(conn, r.getBucketBmKey(bucketid), 0, capacity)
 	if err != nil {
 		return ids, -1, errors.Wrapf(err, "key(%s) Range seq(%d)", r.key, seq)
 	}
@@ -246,4 +244,14 @@ func (r *RedisBitmap) Range(ctx context.Context, seq int) (ids []uint64, next in
 	}
 	next = seq + 1
 	return
+}
+
+func (r *RedisBitmap) BucketsCount(ctx context.Context) (uint64, error) {
+	conn, err := r.pool.GetContext(ctx)
+	if err != nil {
+		return 0, errors.Wrapf(err, "BucketsCount")
+	}
+	defer conn.Close()
+
+	return redis.Uint64(conn.Do("ZCOUNT", r.getZsetKey(), 0, math.MaxInt64))
 }

@@ -80,3 +80,11 @@ func Test_Range(t *testing.T) {
 		fmt.Println("ids:", ids)
 	}
 }
+
+func Test_BucketsCount(t *testing.T) {
+	rb := NewRedisBitmap(newPool("redis://127.0.0.1:6379"), "test_bm", 100)
+
+	n, err := rb.(*RedisBitmap).BucketsCount(testCtx)
+	fmt.Println("n:", n)
+	fmt.Println("err:", err)
+}
